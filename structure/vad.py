@@ -1,46 +1,56 @@
-import numpy as np
-import sounddevice as sd
-from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+print("Loading Silero VAD...")
+from silero_vad import load_silero_vad, get_speech_timestamps
 
 vad_model = load_silero_vad()
-SAMPLE_RATE = 16000          # VAD and Whisper both like 16k
 
 def record_when_speaking(
     silence_threshold_sec=0.8,
     max_duration_sec=15,
 ) -> np.ndarray | None:
     """
-    Listens to the microphone. As soon as speech is detected, records until
-    there is at least `silence_threshold_sec` of silence.
-    Returns the whole utterance as a float32 numpy array, or None if no speech.
+    Listens to microphone using zero-copy fast downsampling inside the callback.
     """
-    print("Listening...")
+    print("🎤 Listening...")
     audio_chunks = []
     is_speaking = False
     silence_frames = 0
-    silence_limit = int(silence_threshold_sec * SAMPLE_RATE / 512)  # 512 frames per block
+    
+    # Calculate limits based on how many 512-frame hardware blocks we expect
+    silence_limit = int(silence_threshold_sec * HARDWARE_SAMPLE_RATE / 512)
 
     def callback(indata, frames, time, status):
         nonlocal is_speaking, silence_frames, audio_chunks
         if status:
-            print(status)
+            print(f"Audio status flag triggered: {status}")
 
-        mono = indata[:, 0] if indata.ndim > 1 else indata
-        audio_chunks.append(mono.copy())
+        # Deep copy the incoming raw data immediately to avoid buffer overwrite
+        mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+        audio_chunks.append(mono)
 
-        # Check VAD on the latest ~1 second of audio
-        recent = np.concatenate(audio_chunks[-int(SAMPLE_RATE/512):])  # 1 sec context
-        speech_ts = get_speech_timestamps(recent, vad_model, sampling_rate=SAMPLE_RATE)
+        # Process VAD on the last ~0.5 seconds of accumulated audio history
+        context_blocks = int((HARDWARE_SAMPLE_RATE * 0.5) / 512)
+        if len(audio_chunks) >= context_blocks:
+            recent_hw = np.concatenate(audio_chunks[-context_blocks:])
+            
+            # FAST DOWNSAMPLING: Slice step approximation instead of heavy SciPy resample
+            # 44100 / 16000 is roughly a step factor of 2.756
+            step = HARDWARE_SAMPLE_RATE / TARGET_SAMPLE_RATE
+            indices = np.arange(0, len(recent_hw), step).astype(np.int32)
+            recent_16k = recent_hw[indices]
+            
+            # Run the VAD inference
+            speech_ts = get_speech_timestamps(recent_16k, vad_model, sampling_rate=TARGET_SAMPLE_RATE)
 
-        if len(speech_ts) > 0:
-            is_speaking = True
-            silence_frames = 0
-        else:
-            if is_speaking:
-                silence_frames += 1
+            if len(speech_ts) > 0:
+                is_speaking = True
+                silence_frames = 0
+            else:
+                if is_speaking:
+                    silence_frames += 1
 
+    # Open stream channel
     with sd.InputStream(
-        samplerate=SAMPLE_RATE,
+        samplerate=HARDWARE_SAMPLE_RATE,
         channels=1,
         dtype='float32',
         callback=callback,
@@ -48,16 +58,22 @@ def record_when_speaking(
     ):
         while True:
             sd.sleep(100)
-            # Start recording only after we actually have some audio
             if is_speaking and silence_frames >= silence_limit:
                 break
-            # Safety timeout
-            if len(audio_chunks) > (max_duration_sec * SAMPLE_RATE // 512):
+            if len(audio_chunks) > (max_duration_sec * HARDWARE_SAMPLE_RATE // 512):
                 break
 
-    if not is_speaking:
+    if not is_speaking or len(audio_chunks) < 2:
         print("No speech detected.")
         return None
 
+    # Stitch the full hardware audio recording together
     full_audio = np.concatenate(audio_chunks)
-    return full_audio
+    
+    # Use standard SciPy resampling ONCE on the full file, safely outside the callback thread
+    num_16k = int(len(full_audio) * TARGET_SAMPLE_RATE / HARDWARE_SAMPLE_RATE)
+    full_audio_16k = resample(full_audio, num_16k)
+    
+    return full_audio_16k
+
+print("✓ Silero VAD loaded with fast-slicing callbacks\n")
