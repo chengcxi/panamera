@@ -21,7 +21,7 @@ wav = model.generate(
 
 # Native VoxCPM output properties
 native_rate = 16000
-target_rate = 44100  # A globally supported hardware standard sample rate
+target_rate = 48000  # A globally supported hardware standard sample rate
 
 print(f"Resampling audio from {native_rate}Hz to {target_rate}Hz...")
 # Calculate the target number of samples needed
@@ -30,6 +30,6 @@ resampled_wav = resample(wav, num_samples)
 
 print("Playing...")
 # Play back using the safe, resampled rate
-sd.play(resampled_wav, samplerate=target_rate)
+sd.play(resampled_wav.astype('float32'), 48000, device=13)
 sd.wait()
 print("Playback finished!")
