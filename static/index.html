@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panamera - Voice & Vision AI Assistant</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Plus+Jakarta+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="glow-orb" id="orb-1"></div>
+    <div class="glow-orb" id="orb-2"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo-area">
+                <span class="logo-dot"></span>
+                <h1>PANAMERA</h1>
+                <span class="logo-badge">Voice + Vision AI</span>
+            </div>
+            <div class="status-bar">
+                <div class="status-indicator">
+                    <span class="status-dot pulsing" id="backend-status-dot"></span>
+                    <span id="backend-status-text">Connecting to backend...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="workspace-grid">
+            
+            <!-- Left Panel: Sight & Sound Input -->
+            <section class="control-panel">
+                <!-- Camera Feed Card -->
+                <div class="glass-card camera-card">
+                    <div class="card-header">
+                        <h2>Visual Environment</h2>
+                        <span class="indicator" id="camera-indicator">Inoperative</span>
+                    </div>
+                    <div class="video-wrapper">
+                        <video id="webcam" autoplay playsinline muted></video>
+                        <canvas id="snapshot-canvas" style="display:none;"></canvas>
+                        <div class="camera-placeholder" id="camera-placeholder">
+                            <div class="placeholder-icon">📷</div>
+                            <p>Camera feed disabled</p>
+                            <button class="btn btn-secondary" id="btn-toggle-camera">Enable Camera</button>
+                        </div>
+                    </div>
+                    <div class="camera-actions">
+                        <button class="btn btn-primary" id="btn-snapshot" disabled>Capture Snapshot</button>
+                        <label class="checkbox-container">
+                            <input type="checkbox" id="chk-auto-capture" checked>
+                            <span class="checkmark"></span>
+                            Auto-capture on voice trigger
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Mic Controls Card -->
+                <div class="glass-card mic-card">
+                    <div class="card-header">
+                        <h2>Voice Controller</h2>
+                    </div>
+                    <div class="mic-visualization">
+                        <canvas id="visualizer-canvas"></canvas>
+                        <div class="mic-status" id="mic-status-label">Tap Mic to Speak</div>
+                    </div>
+                    <div class="mic-actions">
+                        <button class="btn btn-circle" id="btn-mic">
+                            <svg class="mic-icon" viewBox="0 0 24 24">
+                                <path fill="currentColor" d="M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 16.39,17.44 13,17.93V21H11V17.93C7.61,17.44 5,14.53 5,11H7A5,5 0 0,0 12,16A5,5 0 0,0 17,11H19Z" />
+                            </svg>
+                        </button>
+                        <div class="vad-sensitivity">
+                            <label for="slider-sensitivity">Microphone Sensitivity</label>
+                            <input type="range" id="slider-sensitivity" min="1" max="100" value="70">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Conversation Log -->
+            <section class="chat-panel">
+                <div class="glass-card chat-card">
+                    <div class="card-header">
+                        <h2>Interaction Logs</h2>
+                        <button class="btn btn-text" id="btn-clear-chat">Clear Log</button>
+                    </div>
+                    <div class="chat-logs" id="chat-logs-container">
+                        <!-- Welcome message -->
+                        <div class="chat-bubble assistant">
+                            <div class="bubble-content">
+                                <p>Welcome to Panamera. Connect your camera and speak to start. You can say phrases like <strong>"look"</strong>, <strong>"see"</strong>, or <strong>"what do you see"</strong> to trigger image processing automatically!</p>
+                            </div>
+                            <span class="bubble-time">System</span>
+                        </div>
+                    </div>
+                    <div class="chat-input-bar">
+                        <input type="text" id="text-input" placeholder="Type a message or use voice..." autocomplete="off">
+                        <button class="btn btn-primary" id="btn-send">
+                            <svg class="send-icon" viewBox="0 0 24 24">
+                                <path fill="currentColor" d="M2,21L23,12L2,3V10L17,12L2,14V21Z" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Hidden audio element for responses -->
+    <audio id="tts-audio" style="display:none;"></audio>
+
+    <script src="/static/main.js"></script>
+</body>
+</html>

@@ -3,21 +3,83 @@ import numpy as np
 import tempfile
 from scipy.signal import resample
 from scipy.io import wavfile
+import sounddevice as sd
 import os
 from pathlib import Path
+import time
 
 # Path to your whisper.cpp installation
 WHISPER_CPP_DIR = Path("/home/cheng/Downloads/AI/whisper.cpp")
 WHISPER_BINARY = WHISPER_CPP_DIR / "build/bin/whisper-cli"
 WHISPER_MODEL = WHISPER_CPP_DIR / "models/ggml-base.en.bin"
 
+# Audio settings
+RECORD_SAMPLE_RATE = 48000  # Your microphone's native rate
+WHISPER_SAMPLE_RATE = 16000  # What Whisper expects
+
 # Verify paths exist
 assert WHISPER_BINARY.exists(), f"Whisper binary not found at {WHISPER_BINARY}"
 assert WHISPER_MODEL.exists(), f"Whisper model not found at {WHISPER_MODEL}"
 
+def record_audio(duration=5, device=None):
+    """
+    Record audio from microphone at 48kHz
+    
+    Args:
+        duration: Recording duration in seconds
+        device: Input device index (None = default)
+    
+    Returns:
+        numpy array of audio data (float32, range [-1, 1]) at 48kHz
+    """
+    print(f"\n🎤 Recording at {RECORD_SAMPLE_RATE} Hz for {duration} seconds...")
+    print("Speak now!")
+    
+    # Record audio at 48kHz
+    audio_data = sd.rec(
+        int(duration * RECORD_SAMPLE_RATE),
+        samplerate=RECORD_SAMPLE_RATE,
+        channels=1,  # Mono
+        dtype='float32',
+        device=device
+    )
+    
+    # Wait for recording to complete
+    sd.wait()
+    
+    # Flatten in case of multi-channel
+    audio_data = audio_data.flatten()
+    
+    # Normalize to [-1, 1] range
+    max_val = np.abs(audio_data).max()
+    if max_val > 0:
+        audio_data = audio_data / max_val
+    
+    print(f"✅ Recording complete! Captured {len(audio_data)} samples at {RECORD_SAMPLE_RATE} Hz")
+    print(f"Audio level: min={audio_data.min():.3f}, max={audio_data.max():.3f}, mean={audio_data.mean():.3f}")
+    
+    return audio_data
+
+def resample_for_whisper(audio_48k):
+    """
+    Resample audio from 48kHz to 16kHz for Whisper
+    """
+    print(f"🔄 Resampling from {RECORD_SAMPLE_RATE} Hz to {WHISPER_SAMPLE_RATE} Hz...")
+    
+    # Calculate number of samples at 16kHz
+    num_samples_16k = int(len(audio_48k) * WHISPER_SAMPLE_RATE / RECORD_SAMPLE_RATE)
+    
+    # Resample using scipy.signal.resample
+    audio_16k = resample(audio_48k, num_samples_16k)
+    
+    print(f"Resampled to {len(audio_16k)} samples at {WHISPER_SAMPLE_RATE} Hz")
+    
+    return audio_16k
+
 def transcribe_audio_piped(audio: np.ndarray, debug=False) -> str:
     """
     Transcribe by piping raw PCM audio to whisper.cpp via stdin.
+    Audio should already be at 16kHz.
     """
     # Ensure audio is float32 and normalized
     if audio.dtype != np.float32:
@@ -32,8 +94,8 @@ def transcribe_audio_piped(audio: np.ndarray, debug=False) -> str:
     raw_pcm = audio_int16.tobytes()
     
     if debug:
-        print(f"Audio stats: min={audio.min():.3f}, max={audio.max():.3f}, mean={audio.mean():.3f}")
         print(f"PCM bytes: {len(raw_pcm)} bytes, {len(audio_int16)} samples")
+        print(f"Duration: {len(audio_int16) / WHISPER_SAMPLE_RATE:.2f} seconds")
     
     # Call whisper.cpp with raw audio on stdin
     cmd = [
@@ -41,25 +103,27 @@ def transcribe_audio_piped(audio: np.ndarray, debug=False) -> str:
         "-m", str(WHISPER_MODEL),
         "-f", "-",              # Read from stdin
         "-ac", "1",            # Mono
-        "-ar", "16000",        # Sample rate
-        "-c", "0",             # No captions
+        "-ar", str(WHISPER_SAMPLE_RATE),  # 16000 Hz
         "-t", "4",             # Threads
         "--no-timestamps",     # No timestamps
-        "-ovtt",               # Output as VTT (cleaner output)
+        "--print-progress", "false",
     ]
     
     try:
+        start_time = time.time()
         result = subprocess.run(
             cmd,
             input=raw_pcm,
             capture_output=True,
             timeout=10,
-            check=False  # Don't raise on error, we'll check manually
+            check=False
         )
+        elapsed = time.time() - start_time
         
-        if debug:
-            if result.stderr:
-                print(f"STDERR: {result.stderr.decode('utf-8', errors='ignore')[:500]}")
+        if debug and result.stderr:
+            stderr_text = result.stderr.decode('utf-8', errors='ignore')
+            if stderr_text.strip():
+                print(f"Whisper stderr: {stderr_text[:200]}")
         
         if result.returncode != 0:
             error_msg = result.stderr.decode('utf-8', errors='ignore')
@@ -69,17 +133,10 @@ def transcribe_audio_piped(audio: np.ndarray, debug=False) -> str:
         # Parse output
         text = result.stdout.decode('utf-8', errors='ignore').strip()
         
-        # Clean up VTT formatting if present
-        lines = text.split('\n')
-        clean_lines = []
-        for line in lines:
-            # Skip timestamp lines and VTT header
-            if '-->' in line or line.startswith('WEBVTT'):
-                continue
-            if line.strip():
-                clean_lines.append(line.strip())
+        if debug:
+            print(f"Transcription took {elapsed:.2f} seconds")
         
-        return ' '.join(clean_lines)
+        return text
         
     except subprocess.TimeoutExpired:
         print("Whisper transcription timed out")
@@ -88,126 +145,173 @@ def transcribe_audio_piped(audio: np.ndarray, debug=False) -> str:
         print(f"Unexpected error: {e}")
         return ""
 
-def transcribe_audio_file(audio: np.ndarray, debug=False) -> str:
-    """
-    Transcribe using a temporary WAV file (more reliable).
-    """
-    import wave
+def list_audio_devices():
+    """List available audio input devices"""
+    print("\n📋 Available audio input devices:")
+    devices = sd.query_devices()
+    for i, device in enumerate(devices):
+        if device['max_input_channels'] > 0:
+            print(f"  Device {i}: {device['name']}")
+            print(f"      Default samplerate: {device['default_samplerate']} Hz")
+            print(f"      Max input channels: {device['max_input_channels']}")
+
+def test_microphone_piped():
+    """Test piped transcription with microphone input"""
     
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-        tmp_path = tmp_file.name
+    # List available devices
+    list_audio_devices()
+    
+    # Let user select device (or use default)
+    try:
+        device_input = input("\nEnter device number (or press Enter for default): ").strip()
+        device = int(device_input) if device_input else None
+    except ValueError:
+        print("Invalid input, using default device")
+        device = None
+    
+    # Recording settings
+    duration = float(input("Recording duration in seconds (default 5): ").strip() or "5")
+    
+    # Record audio at 48kHz
+    print("\n" + "="*50)
+    audio_48k = record_audio(duration=duration, device=device)
+    
+    # Check if recording captured any sound
+    if np.abs(audio_48k).max() < 0.01:
+        print("⚠️ Warning: Very low audio level detected! Check your microphone.")
+        retry = input("Retry? (y/n): ").lower()
+        if retry == 'y':
+            return test_microphone_piped()
+    
+    # Resample to 16kHz for Whisper
+    audio_16k = resample_for_whisper(audio_48k)
+    
+    # Transcribe
+    print("\n🎙️ Transcribing with whisper.cpp (piped)...")
+    print("-" * 50)
+    text = transcribe_audio_piped(audio_16k, debug=True)
+    print("-" * 50)
+    
+    if text:
+        print(f"📝 Transcription: {text}")
+    else:
+        print("❌ No transcription produced. Possible issues:")
+        print("   - Microphone volume too low")
+        print("   - No speech detected")
+        print("   - Background noise or silence")
+        print("   - Try speaking louder or closer to the microphone")
+    
+    return text
+
+def continuous_mode():
+    """Continuous recording and transcription mode"""
+    print("\n" + "="*60)
+    print("🎙️ CONTINUOUS MODE - Speak, then pause to transcribe")
+    print("="*60)
+    
+    # List devices
+    list_audio_devices()
     
     try:
-        # Ensure correct format
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-        
-        if audio.max() > 1.0 or audio.min() < -1.0:
-            audio = audio / np.max(np.abs(audio))
-        
-        # Write WAV file
-        with wave.open(tmp_path, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(16000)
-            audio_int16 = (audio * 32767).astype(np.int16)
-            wav_file.writeframes(audio_int16.tobytes())
-        
-        if debug:
-            print(f"WAV file created: {tmp_path}")
-            print(f"Duration: {len(audio_int16)/16000:.2f} seconds")
-        
-        # Call whisper.cpp
-        cmd = [
-            str(WHISPER_BINARY),
-            "-m", str(WHISPER_MODEL),
-            "-f", tmp_path,
-            "-t", "4",
-            "--no-timestamps",
-            "-ovtt",
-        ]
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=10,
-            check=False
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr.decode('utf-8', errors='ignore')
-            print(f"Whisper error (code {result.returncode}): {error_msg}")
-            return ""
-        
-        text = result.stdout.decode('utf-8', errors='ignore').strip()
-        
-        # Clean VTT formatting
-        lines = text.split('\n')
-        clean_lines = []
-        for line in lines:
-            if '-->' in line or line.startswith('WEBVTT'):
+        device_input = input("\nEnter device number (or press Enter for default): ").strip()
+        device = int(device_input) if device_input else None
+    except ValueError:
+        device = None
+    
+    print("\nInstructions:")
+    print("  - Speak naturally, recording happens in chunks")
+    print("  - Press Enter to record each chunk")
+    print("  - Press Ctrl+C to stop")
+    print()
+    
+    chunk_duration = 3  # seconds per chunk
+    
+    try:
+        while True:
+            input("Press Enter to start recording (or Ctrl+C to quit)...")
+            
+            # Record at 48kHz
+            audio_48k = record_audio(duration=chunk_duration, device=device)
+            
+            # Check if audio has meaningful content
+            if np.abs(audio_48k).max() < 0.02:
+                print("⚠️ No significant audio detected, skipping...")
                 continue
-            if line.strip():
-                clean_lines.append(line.strip())
+            
+            # Resample to 16kHz
+            audio_16k = resample_for_whisper(audio_48k)
+            
+            # Transcribe
+            print("Transcribing...", end=" ", flush=True)
+            text = transcribe_audio_piped(audio_16k, debug=False)
+            
+            if text:
+                print(f"\n📝 {text}\n")
+            else:
+                print("No speech detected\n")
+                
+    except KeyboardInterrupt:
+        print("\n\n👋 Goodbye!")
+
+def quick_test():
+    """Quick 3-second test"""
+    print("\nQuick test - 3 second recording at 48kHz")
+    try:
+        # Get default device info
+        default_device = sd.query_devices(None, 'input')
+        print(f"\nUsing default input device: {default_device['name']}")
         
-        return ' '.join(clean_lines)
+        # Record at 48kHz
+        audio_48k = record_audio(duration=3, device=None)
         
+        if np.abs(audio_48k).max() < 0.02:
+            print("\n⚠️ Low audio level! Please check:")
+            print("   - Microphone permissions")
+            print("   - Microphone volume settings")
+            print("   - Physical microphone connection")
+            return
+        
+        # Resample and transcribe
+        audio_16k = resample_for_whisper(audio_48k)
+        text = transcribe_audio_piped(audio_16k, debug=True)
+        
+        if text:
+            print(f"\n📝 Result: {text}")
+        else:
+            print("\n❌ No transcription - speak louder or check microphone")
+            
     except Exception as e:
-        print(f"Error in file transcription: {e}")
-        return ""
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        print(f"\n❌ Error: {e}")
+        print("\nTroubleshooting tips:")
+        print("1. Check if microphone is connected: arecord -l")
+        print("2. Test microphone: arecord -d 3 -r 48000 test.wav")
+        print("3. Playback test: aplay test.wav")
 
-# Use the file-based method first (more reliable)
-transcribe = transcribe_audio_file
-
-# Test with your file
-test_wav_path = "output.wav"
-
-if not os.path.exists(test_wav_path):
-    print(f"❌ Error: The file '{test_wav_path}' does not exist!")
-else:
-    print(f"Reading file: {test_wav_path}...")
+if __name__ == "__main__":
+    print("🎤 MICROPHONE PIPED TRANSCRIPTION TEST (48kHz → 16kHz)")
+    print("="*60)
+    print(f"Recording at: {RECORD_SAMPLE_RATE} Hz")
+    print(f"Whisper expects: {WHISPER_SAMPLE_RATE} Hz")
+    print()
     
-    # Read the wav file
-    sample_rate, audio_data = wavfile.read(test_wav_path)
+    # Check if sounddevice is installed
+    try:
+        import sounddevice
+    except ImportError:
+        print("❌ sounddevice not installed! Please run: pip install sounddevice")
+        exit(1)
     
-    print(f"Original: {sample_rate}Hz, shape={audio_data.shape}, dtype={audio_data.dtype}")
+    # Ask user for mode
+    print("Select mode:")
+    print("  1. Single recording (test once)")
+    print("  2. Continuous mode (record, transcribe, repeat)")
+    print("  3. Quick test (3-second recording)")
     
-    # 1. Handle Stereo to Mono conversion
-    if len(audio_data.shape) > 1:
-        print("Converting stereo to mono...")
-        audio_data = audio_data.mean(axis=1)
+    mode = input("\nChoice (1/2/3): ").strip()
     
-    # 2. Normalize to float32 [-1.0, 1.0]
-    if audio_data.dtype == np.int16:
-        audio_data = audio_data.astype(np.float32) / 32767.0
-    elif audio_data.dtype == np.int32:
-        audio_data = audio_data.astype(np.float32) / 2147483647.0
-    elif audio_data.dtype == np.uint8:
-        audio_data = (audio_data.astype(np.float32) - 128) / 128.0
-    elif audio_data.dtype != np.float32:
-        audio_data = audio_data.astype(np.float32)
-    
-    # 3. Check if audio is silent
-    if np.abs(audio_data).max() < 0.01:
-        print("⚠️ Warning: Audio appears to be very quiet or silent!")
-    
-    # 4. Resample to 16kHz if needed
-    if sample_rate != 16000:
-        print(f"Resampling from {sample_rate}Hz to 16000Hz...")
-        num_samples = int(len(audio_data) * 16000 / sample_rate)
-        audio_data = resample(audio_data, num_samples)
-    
-    print(f"Processed: {len(audio_data)} samples, {len(audio_data)/16000:.2f} seconds")
-    
-    # Try both methods
-    print("\n--- Trying file-based transcription ---")
-    text = transcribe_audio_file(audio_data, debug=True)
-    print(f"Result: '{text}'")
-    
-    if not text:
-        print("\n--- Trying piped transcription ---")
-        text = transcribe_audio_piped(audio_data, debug=True)
-        print(f"Result: '{text}'")
+    if mode == "2":
+        continuous_mode()
+    elif mode == "3":
+        quick_test()
+    else:
+        test_microphone_piped()

@@ -2,6 +2,11 @@ import numpy as np
 import sounddevice as sd
 from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
 
+print("\n--- Available Audio Hardware Interfaces ---")
+print(sd.query_devices())
+print(f"Default input device index: {sd.default.device[0]}")
+print("-------------------------------------------\n")
+
 vad_model = load_silero_vad()
 SAMPLE_RATE = 16000          # VAD and Whisper both like 16k
 

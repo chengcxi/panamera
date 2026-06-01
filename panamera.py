@@ -15,8 +15,12 @@ WHISPER_CPP_DIR = Path("/home/cheng/Downloads/AI/whisper.cpp")
 WHISPER_BINARY = WHISPER_CPP_DIR / "build/bin/whisper-cli"
 WHISPER_MODEL = WHISPER_CPP_DIR / "models/ggml-base.en.bin"
 
-HARDWARE_SAMPLE_RATE = 44100  # Your working rate
+HARDWARE_SAMPLE_RATE = 48000  # Your working rate
 TARGET_SAMPLE_RATE = 16000    # Required by VAD and Whisper
+# Index 11 targets the Ryzen HD Audio Controller Digital Microphone (JACK)
+MICROPHONE_DEVICE_INDEX = 11
+# Index 13 targets the Ryzen HD Audio Controller Speaker (JACK)
+SPEAKER_DEVICE_INDEX = 13
 
 # Camera triggers
 CAMERA_TRIGGERS = ["look", "see", "camera", "view", "what do you see"]
@@ -213,8 +217,8 @@ def speak(text: str):
         wav = tts_model.generate(text=text, cfg_value=2.0, inference_timesteps=10)
         
         # Audio array physical hardware interpolation to prevent ALSA rate crash
-        native_rate = 16000
-        target_rate = 44100
+        native_rate = TARGET_SAMPLE_RATE
+        target_rate = HARDWARE_SAMPLE_RATE
         num_samples = int(len(wav) * target_rate / native_rate)
         resampled_wav = resample(wav, num_samples)
         
