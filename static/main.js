@@ -1,44 +1,29 @@
 // Web UI State Management
 const STATE = {
     connected: false,
-    cameraActive: false,
-    recording: false,
-    audioContext: null,
-    mediaStream: null,
-    recorder: null,
-    audioChunks: [],
-    cameraStream: null,
-    snapshotBlob: null,
+    running: false,
+    pid: null,
+    uptime: 0,
+    lastLogIndex: 0,
+    logs: []
 };
 
 // UI Elements
 const backendStatusDot = document.getElementById('backend-status-dot');
 const backendStatusText = document.getElementById('backend-status-text');
-const webcam = document.getElementById('webcam');
-const btnToggleCamera = document.getElementById('btn-toggle-camera');
-const cameraPlaceholder = document.getElementById('camera-placeholder');
-const cameraIndicator = document.getElementById('camera-indicator');
-const btnSnapshot = document.getElementById('btn-snapshot');
+const engineIndicator = document.getElementById('engine-indicator');
 const btnMic = document.getElementById('btn-mic');
 const micStatusLabel = document.getElementById('mic-status-label');
-const chatLogsContainer = document.getElementById('chat-logs-container');
-const textInput = document.getElementById('text-input');
-const btnSend = document.getElementById('btn-send');
-const btnClearChat = document.getElementById('btn-clear-chat');
-const ttsAudio = document.getElementById('tts-audio');
-const chkAutoCapture = document.getElementById('chk-auto-capture');
-const sliderSensitivity = document.getElementById('slider-sensitivity');
+const micToggleTitle = document.getElementById('mic-toggle-title');
+const micToggleDesc = document.getElementById('mic-toggle-desc');
+const deviceSelect = document.getElementById('device');
+const logsContainer = document.getElementById('logs-container');
+const btnClearLogs = document.getElementById('btn-clear-logs');
+const settingsForm = document.getElementById('settings-form');
 
 // Canvas visualizers
 const visualizerCanvas = document.getElementById('visualizer-canvas');
 const visCtx = visualizerCanvas.getContext('2d');
-const snapshotCanvas = document.getElementById('snapshot-canvas');
-
-// Sensitivity multiplier for voice visualizer
-let sensitivity = 0.7;
-sliderSensitivity.addEventListener('input', (e) => {
-    sensitivity = e.target.value / 100;
-});
 
 // Fit Visualizer Canvas size
 function resizeCanvas() {
@@ -48,35 +33,48 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
-// Draw visualizer idle wave
-let animationFrameId = null;
+// Draw visualizer wave animation
 function drawVisualizer() {
     visCtx.clearRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
-    visCtx.lineWidth = 2;
+    visCtx.lineWidth = 2.5;
     
-    if (STATE.recording) {
-        // High activity wave when recording
-        visCtx.strokeStyle = 'rgba(239, 68, 68, 0.7)';
+    if (STATE.running) {
+        // High activity wave when running (simulating real-time voice processing)
+        visCtx.strokeStyle = 'rgba(217, 70, 239, 0.7)'; // Magenta pulse
         visCtx.beginPath();
         const sliceWidth = visualizerCanvas.width / 100;
         let x = 0;
         
         for (let i = 0; i < 100; i++) {
-            const val = (Math.sin(i * 0.15 + Date.now() * 0.01) * Math.cos(i * 0.05 + Date.now() * 0.005)) * 40 * sensitivity;
+            const val = (Math.sin(i * 0.15 + Date.now() * 0.012) * Math.cos(i * 0.04 + Date.now() * 0.006)) * 35;
             const y = (visualizerCanvas.height / 2) + val;
             if (i === 0) visCtx.moveTo(x, y);
             else visCtx.lineTo(x, y);
             x += sliceWidth;
+        }
+        visCtx.stroke();
+        
+        // Secondary subtle inner wave
+        visCtx.strokeStyle = 'rgba(6, 182, 212, 0.4)'; // Cyan
+        visCtx.lineWidth = 1.5;
+        visCtx.beginPath();
+        let x2 = 0;
+        for (let i = 0; i < 100; i++) {
+            const val = (Math.cos(i * 0.1 + Date.now() * 0.01) * Math.sin(i * 0.06 + Date.now() * 0.008)) * 20;
+            const y = (visualizerCanvas.height / 2) + val;
+            if (i === 0) visCtx.moveTo(x2, y);
+            else visCtx.lineTo(x2, y);
+            x2 += sliceWidth;
         }
         visCtx.stroke();
     } else {
         // Slow glowing pulse wave when idle
-        visCtx.strokeStyle = 'rgba(139, 92, 246, 0.3)';
+        visCtx.strokeStyle = 'rgba(139, 92, 246, 0.25)'; // Darker purple
         visCtx.beginPath();
         const sliceWidth = visualizerCanvas.width / 50;
         let x = 0;
         for (let i = 0; i < 50; i++) {
-            const val = Math.sin(i * 0.1 + Date.now() * 0.002) * 15;
+            const val = Math.sin(i * 0.12 + Date.now() * 0.002) * 12;
             const y = (visualizerCanvas.height / 2) + val;
             if (i === 0) visCtx.moveTo(x, y);
             else visCtx.lineTo(x, y);
@@ -85,360 +83,195 @@ function drawVisualizer() {
         visCtx.stroke();
     }
     
-    animationFrameId = requestAnimationFrame(drawVisualizer);
+    requestAnimationFrame(drawVisualizer);
 }
 drawVisualizer();
 
-// 1. Connection check loop
-async function checkBackendConnection() {
+// Add lines to the terminal console
+function appendLog(line) {
+    const isSystem = line.includes('[SYSTEM]');
+    const isError = line.includes('error:') || line.includes('[SYSTEM] Failed') || line.includes('STDERR');
+    
+    const lineEl = document.createElement('div');
+    lineEl.className = 'log-line';
+    if (isSystem) lineEl.classList.add('system');
+    if (isError) lineEl.classList.add('error');
+    
+    // Simple timestamp
+    const now = new Date();
+    const ts = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+    
+    lineEl.innerHTML = `<span class="log-time">${ts}</span> ${line}`;
+    
+    logsContainer.appendChild(lineEl);
+    logsContainer.scrollTop = logsContainer.scrollHeight;
+}
+
+// 1. Connection and Status Loop
+async function checkStatus() {
     try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        if (data.status === 'ready') {
-            backendStatusDot.className = 'status-dot active';
-            backendStatusText.textContent = 'Ready';
-            STATE.connected = true;
-        } else {
-            backendStatusDot.className = 'status-dot pulsing';
-            backendStatusText.textContent = 'Models Loading...';
-            STATE.connected = false;
-        }
+        
+        STATE.connected = true;
+        backendStatusDot.className = 'status-dot active';
+        backendStatusText.textContent = 'Connected';
+
+        const proc = data.process;
+        updateProcessState(proc.running, proc.pid, proc.uptime);
     } catch (e) {
+        STATE.connected = false;
         backendStatusDot.className = 'status-dot';
         backendStatusText.textContent = 'Disconnected';
-        STATE.connected = false;
+        updateProcessState(false, null, 0);
     }
 }
-setInterval(checkBackendConnection, 5000);
-checkBackendConnection();
 
-// 2. Camera Integration
-async function toggleCamera() {
-    if (STATE.cameraActive) {
-        // Stop Camera
-        if (STATE.cameraStream) {
-            STATE.cameraStream.getTracks().forEach(track => track.stop());
-        }
-        webcam.style.display = 'none';
-        cameraPlaceholder.style.display = 'flex';
-        cameraIndicator.textContent = 'Inoperative';
-        cameraIndicator.classList.remove('active');
-        btnToggleCamera.textContent = 'Enable Camera';
-        btnSnapshot.disabled = true;
-        STATE.cameraActive = false;
-        STATE.cameraStream = null;
-    } else {
-        // Start Camera
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 640, height: 480 },
-                audio: false
-            });
-            webcam.srcObject = stream;
-            webcam.style.display = 'block';
-            cameraPlaceholder.style.display = 'none';
-            cameraIndicator.textContent = 'Live';
-            cameraIndicator.classList.add('active');
-            btnToggleCamera.textContent = 'Disable Camera';
-            btnSnapshot.disabled = false;
-            STATE.cameraActive = true;
-            STATE.cameraStream = stream;
-        } catch (e) {
-            console.error('Camera access denied or failed', e);
-            alert('Unable to open camera: ' + e.message);
-        }
-    }
-}
-btnToggleCamera.addEventListener('click', toggleCamera);
+function updateProcessState(running, pid, uptime) {
+    const prevRunning = STATE.running;
+    STATE.running = running;
+    STATE.pid = pid;
+    STATE.uptime = uptime;
 
-// Capture current video frame as blob
-function captureSnapshot() {
-    if (!STATE.cameraActive) return null;
-    
-    snapshotCanvas.width = webcam.videoWidth;
-    snapshotCanvas.height = webcam.videoHeight;
-    const ctx = snapshotCanvas.getContext('2d');
-    ctx.drawImage(webcam, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
-    
-    // Convert to blob and return
-    return new Promise((resolve) => {
-        snapshotCanvas.toBlob((blob) => {
-            resolve(blob);
-        }, 'image/jpeg', 0.85);
-    });
-}
-
-btnSnapshot.addEventListener('click', async () => {
-    const blob = await captureSnapshot();
-    if (blob) {
-        STATE.snapshotBlob = blob;
-        // Temporary feedback
-        btnSnapshot.textContent = 'Captured ✓';
-        setTimeout(() => { btnSnapshot.textContent = 'Capture Snapshot'; }, 1500);
-    }
-});
-
-// 3. Audio / Microphone Handling & WAV Encoder
-async function startRecording() {
-    STATE.audioChunks = [];
-    try {
-        STATE.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        
-        // Setup AudioContext to obtain standard floats
-        STATE.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const source = STATE.audioContext.createMediaStreamSource(STATE.mediaStream);
-        
-        // Processor node for saving chunks
-        const bufferSize = 4096;
-        STATE.recorder = STATE.audioContext.createScriptProcessor(bufferSize, 1, 1);
-        
-        STATE.recorder.onaudioprocess = (e) => {
-            if (!STATE.recording) return;
-            const inputData = e.inputBuffer.getChannelData(0);
-            // Save a deep copy of the float array
-            STATE.audioChunks.push(new Float32Array(inputData));
-        };
-        
-        source.connect(STATE.recorder);
-        STATE.recorder.connect(STATE.audioContext.destination);
-        
-        STATE.recording = true;
+    if (running) {
+        engineIndicator.textContent = `Active (PID: ${pid})`;
+        engineIndicator.className = 'indicator active';
         btnMic.classList.add('recording');
-        micStatusLabel.textContent = 'Listening... Tap to send';
-    } catch (e) {
-        console.error('Microphone access denied', e);
-        alert('Could not start microphone: ' + e.message);
-    }
-}
-
-function stopRecording() {
-    if (!STATE.recording) return;
-    
-    STATE.recording = false;
-    btnMic.classList.remove('recording');
-    micStatusLabel.textContent = 'Processing voice...';
-    
-    // Stop recording processes
-    if (STATE.recorder) {
-        STATE.recorder.disconnect();
-    }
-    if (STATE.audioContext) {
-        STATE.audioContext.close();
-    }
-    if (STATE.mediaStream) {
-        STATE.mediaStream.getTracks().forEach(track => track.stop());
-    }
-    
-    // Compile recorded chunks into one continuous array
-    const fullBuffer = mergeBuffers(STATE.audioChunks);
-    
-    // Encode to 16-bit PCM WAV (Mono, default input sample rate, typically 44.1k/48k)
-    const wavBlob = encodeWAV(fullBuffer, STATE.audioContext.sampleRate);
-    
-    // Send it to interaction pipeline
-    handleInteraction(null, wavBlob);
-}
-
-function mergeBuffers(channelBuffer) {
-    let result = new Float32Array(channelBuffer.reduce((acc, val) => acc + val.length, 0));
-    let offset = 0;
-    for (let i = 0; i < channelBuffer.length; i++) {
-        result.set(channelBuffer[i], offset);
-        offset += channelBuffer[i].length;
-    }
-    return result;
-}
-
-// standard 16-bit PCM WAV encoder
-function encodeWAV(samples, sampleRate) {
-    const buffer = new ArrayBuffer(44 + samples.length * 2);
-    const view = new DataView(buffer);
-    
-    /* RIFF identifier */
-    writeString(view, 0, 'RIFF');
-    /* file length */
-    view.setUint32(4, 36 + samples.length * 2, true);
-    /* RIFF type */
-    writeString(view, 8, 'WAVE');
-    /* format chunk identifier */
-    writeString(view, 12, 'fmt ');
-    /* format chunk length */
-    view.setUint32(16, 16, true);
-    /* sample format (raw) */
-    view.setUint16(20, 1, true);
-    /* channel count (mono) */
-    view.setUint16(22, 1, true);
-    /* sample rate */
-    view.setUint32(24, sampleRate, true);
-    /* byte rate (sample rate * block align) */
-    view.setUint32(28, sampleRate * 2, true);
-    /* block align (channel count * bytes per sample) */
-    view.setUint16(32, 2, true);
-    /* bits per sample */
-    view.setUint16(34, 16, true);
-    /* data chunk identifier */
-    writeString(view, 36, 'data');
-    /* data chunk length */
-    view.setUint32(40, samples.length * 2, true);
-    
-    // Write floats normalized to 16-bit integers
-    let offset = 44;
-    for (let i = 0; i < samples.length; i++, offset += 2) {
-        let s = Math.max(-1, Math.min(1, samples[i]));
-        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    }
-    
-    return new Blob([view], { type: 'audio/wav' });
-}
-
-function writeString(view, offset, string) {
-    for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-    }
-}
-
-btnMic.addEventListener('click', () => {
-    if (STATE.recording) {
-        stopRecording();
+        micStatusLabel.textContent = 'Assistant Active - Speaking/Listening';
+        micToggleTitle.textContent = 'Assistant Online';
+        micToggleDesc.textContent = `Uptime: ${Math.floor(uptime)}s. Tap to terminate.`;
     } else {
-        startRecording();
+        engineIndicator.textContent = 'Stopped';
+        engineIndicator.className = 'indicator';
+        btnMic.classList.remove('recording');
+        micStatusLabel.textContent = 'Assistant Stopped';
+        micToggleTitle.textContent = 'Assistant Offline';
+        micToggleDesc.textContent = 'Subprocess inactive. Tap to run.';
     }
-});
 
-// 4. API Interaction & Pipeline
-async function handleInteraction(textQuery = null, audioBlob = null) {
+    // Trigger log poll immediately if we just transitioned to running
+    if (running && !prevRunning) {
+        pollLogs();
+    }
+}
+
+// 2. Poll Logs from backend
+async function pollLogs() {
+    if (!STATE.connected) return;
+    try {
+        const res = await fetch('/api/logs');
+        const data = await res.json();
+        const serverLogs = data.logs || [];
+        
+        // Show newly generated logs
+        if (serverLogs.length > STATE.lastLogIndex) {
+            for (let i = STATE.lastLogIndex; i < serverLogs.length; i++) {
+                appendLog(serverLogs[i]);
+            }
+            STATE.lastLogIndex = serverLogs.length;
+        } else if (serverLogs.length < STATE.lastLogIndex) {
+            // Log buffer cleared or restarted on server
+            logsContainer.innerHTML = '';
+            STATE.lastLogIndex = 0;
+            for (let i = 0; i < serverLogs.length; i++) {
+                appendLog(serverLogs[i]);
+            }
+            STATE.lastLogIndex = serverLogs.length;
+        }
+    } catch (e) {
+        console.error('Failed to poll logs', e);
+    }
+}
+
+// 3. Audio Device Fetching
+async function fetchDevices() {
+    try {
+        const res = await fetch('/api/devices');
+        const data = await res.json();
+        if (data.devices && data.devices.length > 0) {
+            // Keep default option
+            deviceSelect.innerHTML = '<option value="">Default System Device</option>';
+            data.devices.forEach(dev => {
+                const opt = document.createElement('option');
+                opt.value = dev;
+                opt.textContent = dev;
+                deviceSelect.appendChild(opt);
+            });
+        }
+    } catch (e) {
+        console.error('Error fetching device list', e);
+    }
+}
+
+// 4. Toggle Run State
+async function toggleEngine() {
     if (!STATE.connected) {
-        alert("Backend not ready or disconnected. Please check status bar.");
-        micStatusLabel.textContent = 'Tap Mic to Speak';
+        alert("Cannot interact: Backend API is disconnected.");
         return;
     }
-    
-    // Check if user is asking the camera to trigger
-    let isCameraTriggered = false;
-    const triggers = ["look", "see", "camera", "view", "what do you see"];
-    
-    if (textQuery) {
-        const textLower = textQuery.toLowerCase();
-        isCameraTriggered = triggers.some(t => textLower.includes(t));
-    }
-    
-    // If using audio input, we let the backend transcribe first. We upload camera capture if Auto-Capture is on.
-    const autoCaptureOn = chkAutoCapture.checked;
-    let finalImageBlob = STATE.snapshotBlob;
-    
-    if (STATE.cameraActive && (autoCaptureOn || isCameraTriggered)) {
-        finalImageBlob = await captureSnapshot();
-    }
-    
-    // Build Form Payload
-    const formData = new FormData();
-    if (textQuery) formData.append('text', textQuery);
-    if (audioBlob) formData.append('audio', audioBlob, 'mic.wav');
-    if (finalImageBlob) formData.append('image', finalImageBlob, 'snapshot.jpg');
-    
-    // Append to Chat UI immediately as user bubble
-    const userBubble = appendChatBubble('user', textQuery || '🎙️ (Voice Message...)');
-    
-    // Attach snapshot image preview in user chat bubble if sent
-    if (finalImageBlob) {
-        const imgUrl = URL.createObjectURL(finalImageBlob);
-        const imgEl = document.createElement('img');
-        imgEl.src = imgUrl;
-        imgEl.className = 'chat-bubble-image';
-        userBubble.querySelector('.bubble-content').prepend(imgEl);
-    }
-    
-    // Clear snapshot state
-    STATE.snapshotBlob = null;
-    
-    try {
-        const res = await fetch('/api/interact', {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!res.ok) {
-            const errData = await res.json();
-            throw new Error(errData.detail || 'Interaction failed');
+
+    if (STATE.running) {
+        // Stop
+        appendLog("[SYSTEM] Stopping Assistant Subprocess...");
+        try {
+            const res = await fetch('/api/stop', { method: 'POST' });
+            const data = await res.json();
+            appendLog(`[SYSTEM] ${data.message}`);
+            checkStatus();
+        } catch (e) {
+            appendLog(`[SYSTEM] Stop error: ${e.message}`);
         }
+    } else {
+        // Start
+        appendLog("[SYSTEM] Starting Assistant Subprocess...");
         
-        const data = await res.json();
-        
-        // Update user bubble text if transcribed from audio
-        if (audioBlob && data.user_text) {
-            userBubble.querySelector('p').textContent = data.user_text;
+        // Retrieve form parameters
+        const formData = new FormData(settingsForm);
+        const params = {
+            model_root: formData.get('model_root') || null,
+            model_path: formData.get('model_path') || null,
+            voice: formData.get('voice') || null,
+            prompt: formData.get('prompt') || null,
+            temperature: parseFloat(formData.get('temperature')) || 0.8,
+            threads: parseInt(formData.get('threads')) || null,
+            quantize: formData.get('quantize') || null,
+            context: parseInt(formData.get('context')) || null,
+            device: formData.get('device') || null,
+            gguf_caching: document.getElementById('gguf_caching').checked
+        };
+
+        try {
+            const res = await fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params)
+            });
+            const data = await res.json();
+            if (res.ok) {
+                appendLog(`[SYSTEM] ${data.message}`);
+                updateProcessState(data.status.running, data.status.pid, data.status.uptime);
+            } else {
+                appendLog(`[SYSTEM] Start error: ${data.detail}`);
+            }
+        } catch (e) {
+            appendLog(`[SYSTEM] Start error: ${e.message}`);
         }
-        
-        // Append response
-        appendChatBubble('assistant', data.assistant_response, `${data.elapsed_seconds}s`);
-        
-        // Play response voice if audio base64 is present
-        if (data.audio) {
-            playTtsAudio(data.audio);
-        }
-        
-    } catch (e) {
-        console.error(e);
-        appendChatBubble('assistant', `⚠️ Error: ${e.message}`, 'System');
-    } finally {
-        micStatusLabel.textContent = 'Tap Mic to Speak';
     }
 }
 
-// 5. Chat UI Helpers
-function appendChatBubble(role, text, timeStr = '') {
-    const bubble = document.createElement('div');
-    bubble.className = `chat-bubble ${role}`;
-    
-    const content = document.createElement('div');
-    content.className = 'bubble-content';
-    
-    const textEl = document.createElement('p');
-    textEl.innerHTML = text.replace(/\n/g, '<br>');
-    content.appendChild(textEl);
-    
-    const time = document.createElement('span');
-    time.className = 'bubble-time';
-    time.textContent = timeStr || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
-    bubble.appendChild(content);
-    bubble.appendChild(time);
-    
-    chatLogsContainer.appendChild(bubble);
-    chatLogsContainer.scrollTop = chatLogsContainer.scrollHeight;
-    
-    return bubble;
-}
-
-function playTtsAudio(base64Data) {
-    try {
-        const audioUrl = `data:audio/wav;base64,${base64Data}`;
-        ttsAudio.src = audioUrl;
-        ttsAudio.play();
-    } catch (e) {
-        console.error('Audio playback error', e);
-    }
-}
-
-// 6. Text input listeners
-btnSend.addEventListener('click', () => {
-    const text = textInput.value.trim();
-    if (text) {
-        handleInteraction(text);
-        textInput.value = '';
-    }
+// Event Listeners
+btnMic.addEventListener('click', toggleEngine);
+btnClearLogs.addEventListener('click', () => {
+    logsContainer.innerHTML = '';
+    appendLog("[SYSTEM] Log console cleared.");
 });
 
-textInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        const text = textInput.value.trim();
-        if (text) {
-            handleInteraction(text);
-            textInput.value = '';
-        }
-    }
-});
-
-btnClearChat.addEventListener('click', () => {
-    chatLogsContainer.innerHTML = '';
+// Initialization
+document.addEventListener('DOMContentLoaded', () => {
+    fetchDevices();
+    checkStatus();
+    
+    // Polling Intervals
+    setInterval(checkStatus, 3000);
+    setInterval(pollLogs, 1000);
 });
