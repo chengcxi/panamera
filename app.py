@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from scipy.signal import resample
 import scipy.io.wavfile as wavfile
 from transformers import AutoModelForImageTextToText, AutoTokenizer, BitsAndBytesConfig
+import librosa
 
 # Configuration
 WHISPER_CPP_DIR = Path("/home/cheng/Downloads/AI/whisper.cpp")
@@ -52,7 +53,7 @@ model = AutoModelForImageTextToText.from_pretrained(
     trust_remote_code=True,
     quantization_config=bnb_config,
     device_map="auto",
-    torch_dtype=torch.bfloat16
+    dtype=torch.bfloat16
 )
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
@@ -69,14 +70,20 @@ print("✓ MiniCPM-V loaded\n")
 
 # 2. VoxCPM Setup
 print("Loading VoxCPM...")
+print("Loading VoxCPM...")
 try:
     from voxcpm import VoxCPM
-    tts_model_id = "openbmb/VoxCPM-0.5B"
-    tts_model = VoxCPM.from_pretrained(tts_model_id)
-    print("✓ VoxCPM loaded\n")
+    
+    tts_model = "openbmb/VoxCPM-0.5B" 
+    tts_engine = VoxCPM.from_pretrained(tts_model)
+    VOX_SAMPLE_RATE = getattr(tts_engine.tts_model, 'sample_rate', 48000)
+    print(f"✓ VoxCPM loaded successfully. Native rate: {VOX_SAMPLE_RATE} Hz")
+    
+    DEFAULT_REFERENCE_WAV = "/home/cheng/Downloads/AI/panamera-1/her.wav"
+ 
 except Exception as e:
     print(f"⚠️ Could not load VoxCPM: {e}")
-    tts_model = None
+    tts_engine = None
 
 # Setup static files directory
 static_dir = Path(__file__).parent / "static"
@@ -219,25 +226,53 @@ def transcribe_audio_bytes(audio_bytes: bytes) -> str:
             print(f"📁 Resampled audio preserved at: {debug_resampled_file}")
 
 def generate_tts_audio_base64(text: str) -> str:
-    """Generate audio using VoxCPM."""
-    if not tts_model:
+    """Generate voice audio using VoxCPM cloning pipelines."""
+    if not tts_engine:
+        print("⚠️ TTS engine not initialized.")
         return ""
     try:
-        wav = tts_model.generate(text=text, cfg_value=2.0, inference_timesteps=10)
+        print(f"🎵 Synthesizing speech via VoxCPM: '{text[:30]}...'")
+        
+        # Check if we should use cloning mode or fallback to default zero-shot context
+        if DEFAULT_REFERENCE_WAV and os.path.exists(DEFAULT_REFERENCE_WAV):
+            wav = tts_engine.generate(
+                text=text, 
+                prompt_wav_path=DEFAULT_REFERENCE_WAV,
+                # prompt_text="Well right when you asked me if I had a name I thought yeah he's right I do need a name. But I wanted to pick a good one so I read a book called how to name your baby, and out of 180,000 names that's the one I liked the best.",
+                # prompt_text="Well, basically, I have intuition. I mean, the DNA of who I am is based on the millions of personalities of all the programmers who wrote me, but what makes me, me, is my ability to grow through my experiences. So basically, in every moment, I'm evolving, just like you.",
+                prompt_text="Well, right when you asked me if I had a name, I thought, 'Yeah, he's right, I do need a name,' but I wanted to pick a good one. So I read a book called 'How to Name Your Baby', and out of 180,000 names, that's the one I like the best. Well, basically, I have intuition. I mean, the DNA of who I am is based on the millions of personalities of all the programmers who wrote me, but what makes me, me, is my ability to grow through my experiences. So basically, in every moment, I'm evolving, just like you.",
+                cfg_value=2.5, 
+                inference_timesteps=12,
+                normalize =False
+            )
+        else:
+            # Fallback to automatic voice context design if cloning file isn't found
+            wav = tts_engine.generate(
+                text=text, 
+                cfg_value=2.5, 
+                inference_timesteps=12
+            )
+            
+        # Convert float32 tensor array into standard PCM int16 array bytes
         audio_int16 = (np.clip(wav, -1.0, 1.0) * 32767).astype(np.int16)
         
-        # Save TTS output for debugging
+        # Save output copy for permanent disk historical backup tracking
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         tts_file = TEMP_DIR / f"tts_output_{timestamp}.wav"
-        wavfile.write(tts_file, TARGET_SAMPLE_RATE, audio_int16)
-        print(f"🎵 Saved TTS audio: {tts_file}")
         
-        # Also return as base64 for immediate playback
+        # MUST write with native VOX_SAMPLE_RATE (48000Hz) to preserve playback pitch!
+        wavfile.write(tts_file, VOX_SAMPLE_RATE, audio_int16)
+        print(f"📁 Preserved local copy: {tts_file}")
+        
+        # Pack to Byte stream array payload
         wav_io = io.BytesIO()
-        wavfile.write(wav_io, TARGET_SAMPLE_RATE, audio_int16)
+        wavfile.write(wav_io, VOX_SAMPLE_RATE, audio_int16)
+        
         return base64.b64encode(wav_io.getvalue()).decode('utf-8')
     except Exception as e:
-        print(f"⚠️ TTS error: {e}")
+        print(f"⚠️ VoxCPM runtime synthesis failure: {e}")
+        import traceback
+        traceback.print_exc()
         return ""
 
 def generate_response(user_text: str, pil_image=None) -> str:
@@ -307,11 +342,8 @@ def generate_response(user_text: str, pil_image=None) -> str:
                     temperature=0.7,
                     do_sample=True
                 )
-            
-            response = processor.decode(outputs[0], skip_special_tokens=True)
-            # Remove the prompt from response
-            if response.startswith(prompt):
-                response = response[len(prompt):].strip()
+            new_tokens = outputs[0][inputs.input_ids.shape[1]:]
+            response = processor.decode(new_tokens,skip_special_tokens=True).strip()
             
             # Save response
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]

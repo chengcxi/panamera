@@ -287,6 +287,44 @@ def quick_test():
         print("2. Test microphone: arecord -d 3 -r 48000 test.wav")
         print("3. Playback test: aplay test.wav")
 
+def transcribe_file(file_path: str) -> str:
+    """
+    Transcribe an audio file using whisper.cpp.
+    Supports any format ffmpeg can decode.
+    """
+
+    cmd = [
+        str(WHISPER_BINARY),
+        "-m", str(WHISPER_MODEL),
+        "-f", file_path,
+        "-t", "4",
+        "-l", "en",
+        "--no-timestamps",
+        "--print-progress", "false"
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=60,
+            check=True
+        )
+
+        text = result.stdout.decode("utf-8").strip()
+        text = text.replace("[BLANK_AUDIO]", "").strip()
+
+        return text
+
+    except subprocess.CalledProcessError as e:
+        print(f"Whisper error: {e}")
+        print(e.stderr.decode("utf-8", errors="ignore"))
+        return ""
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return ""
+
 if __name__ == "__main__":
     print("🎤 MICROPHONE PIPED TRANSCRIPTION TEST (48kHz → 16kHz)")
     print("="*60)
@@ -306,12 +344,34 @@ if __name__ == "__main__":
     print("  1. Single recording (test once)")
     print("  2. Continuous mode (record, transcribe, repeat)")
     print("  3. Quick test (3-second recording)")
+    print("  4. Transcribe audio file")
     
-    mode = input("\nChoice (1/2/3): ").strip()
+    mode = input("\nChoice (1/2/3/4): ").strip()
     
     if mode == "2":
         continuous_mode()
     elif mode == "3":
         quick_test()
+    elif mode == "4":
+        path = input("\nAudio file path: ").strip()
+
+        if not os.path.exists(path):
+            print("❌ File not found")
+            exit(1)
+
+        print(f"\n🎙️ Transcribing: {path}")
+        print("-" * 50)
+
+        start = time.time()
+        text = transcribe_file(path)
+        elapsed = time.time() - start
+
+        print("-" * 50)
+
+        if text:
+            print(f"\n📝 Transcription:\n{text}")
+            print(f"\n⏱️ Time: {elapsed:.2f}s")
+        else:
+            print("\n❌ No transcription produced")
     else:
         test_microphone_piped()
